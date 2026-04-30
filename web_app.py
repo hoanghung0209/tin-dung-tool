@@ -65,7 +65,8 @@ def fill_qr_to_form(info):
 
 def fill_plan_to_form(ma_pa, df_pa_data):
     """Điền dữ liệu phương án vào các ô TLCP, HMTN..."""
-    mask = df_pa_data['Mã phương án'].astype(str).str.strip().lower() == str(ma_pa).lower()
+    # Đã sửa lỗi .str.lower() tại đây
+    mask = df_pa_data['Mã phương án'].astype(str).str.strip().str.lower() == str(ma_pa).strip().lower()
     plan_rows = df_pa_data[mask]
     
     df_cp = plan_rows[plan_rows['Loại'].astype(str).str.contains('chi|phí|cp', case=False, na=False)]
@@ -187,7 +188,7 @@ if excel_file and docx_file:
             val = str(st.session_state.get(f"input_{ph}", "")).strip()
             
             # Auto-format tiền tệ
-            money_kws = ["doanh thu", "thu nhập", "chi phí", "số tiền", "giá trị", "vốn", "định giá", "lãi"]
+            money_kws = ["doanh thu", "thu nhập", "chi phí", "số tiền", "giá trị", "vốn", "định giá", "lãi", "hạn mức"]
             if any(k in ds.lower() for k in money_kws) and val.replace(".","").isdigit():
                 val = format_money_vi(val.replace(".",""))
             
@@ -207,7 +208,7 @@ if excel_file and docx_file:
         if name_key:
             name = st.session_state.get(f"input_{name_key}", "")
             if name:
-                initials = "".join([w[0].upper() for w in name.split() if w])
+                initials = "".join([w[0].upper() for word in name.split() if w])
                 auto_id = f"{initials}-{datetime.now().strftime('%d%m%y')}-001"
                 for ph, ds in st.session_state.mapping.items():
                     if "mã" in ds.lower() and "hồ sơ" in ds.lower(): ctx[var_name(ph)] = auto_id
