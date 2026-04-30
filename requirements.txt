@@ -1,0 +1,7 @@
+streamlit
+pandas
+openpyxl
+docxtpl
+num2words
+pyzbar
+Pillow
