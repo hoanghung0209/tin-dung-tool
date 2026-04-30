@@ -6,4 +6,4 @@ num2words
 Pillow
 numpy
 opencv-python-headless
-zxingcpp
+zxing-cpp
