@@ -32,7 +32,7 @@ st.markdown("""
         background-color: #F8F9F9;
     }
     </style>
-    """, unsafe_allow_width=True)
+    """, unsafe_allow_html=True)
 
 # --- KHỞI TẠO SESSION STATE (BỘ NHỚ TẠM) ---
 if "form_data" not in st.session_state:
@@ -190,7 +190,8 @@ if excel_file and docx_file:
             initials = "".join([w[0].upper() for word in name.split() if w])
             auto_id = f"{initials}-{datetime.now().strftime('%d%m%y')}-001"
             for ph, ds in mapping.items():
-                if "mã" in ds.lower() and "hồ sơ" in ds.lower(): ctx[var_name(ph)] = auto_id
+                if "mã" in ds.lower() and ("hồ sơ" in ds.lower() or "hscv" in ds.lower()):
+                    ctx[var_name(ph)] = auto_id
 
         # Render Word
         output = io.BytesIO()
