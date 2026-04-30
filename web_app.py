@@ -1,13 +1,12 @@
 import os
 import io
 import re
-import json
 import pandas as pd
 from datetime import datetime
 import streamlit as st
 from docxtpl import DocxTemplate, RichText
 
-# Import core 
+# Import core
 from config import NOICAP_OPTIONS, LOAN_TYPE_OPTIONS, LONG_TEXT_HINTS
 from core.utils import (
     vi_title_name, parse_cccd_payload, validate_cccd_12_digits,
@@ -18,7 +17,7 @@ from core.scanner import decode_qr_offline
 from core.document import read_mapping
 
 # ==========================================
-# CÁC HÀM BỔ TRỢ THUẦN WEB
+# CÁC HÀM BỔ TRỢ & LOGIC NGHIỆP VỤ
 # ==========================================
 def number_to_vn_money(num_str):
     try:
@@ -43,8 +42,20 @@ def number_to_vn_decimal(text_val):
         return final_txt[0].upper() + final_txt[1:] + " mét vuông."
     except: return ""
 
+def is_target_match(target, d_low):
+    """Hàm chống ghi đè: Lọc chính xác đối tượng cần điền QR"""
+    if target == "Tất cả": return True
+    if target.lower() not in d_low: return False
+    
+    # Nếu là Thành viên chính, tuyệt đối không được ghi đè vào các trường của người khác
+    if target == "Thành viên":
+        exclusions = ["đồng vay", "ủy quyền", "vợ", "chồng", "bảo lãnh", "thụ hưởng"]
+        if any(ex in d_low for ex in exclusions):
+            return False
+    return True
+
 # ==========================================
-# CALLBACKS: KÍCH HOẠT KHI TƯƠNG TÁC XONG Ô NHẬP LIỆU
+# CALLBACKS: KÍCH HOẠT KHI NHẬP LIỆU XONG
 # ==========================================
 def process_field_change(ph, d_lower, field_types, mapping):
     val = str(st.session_state[ph])
@@ -55,13 +66,14 @@ def process_field_change(ph, d_lower, field_types, mapping):
     money_kws = ["doanh thu", "thu nhập", "chi phí", "số tiền", "giá trị", "vốn", "định giá", "lãi", "hạn mức"]
     is_money = "money" in ft or "spell:" in ft or any(kw in d_lower for kw in money_kws)
 
+    # Format Tiền
     if is_money and digits:
         st.session_state[ph] = f"{int(digits):,}".replace(",", ".")
         if "spell:" in ft:
             target = re.split(r"^spell\s*:", ft, flags=re.IGNORECASE)[1].strip()
-            if target in st.session_state:
-                st.session_state[target] = number_to_vn_money(digits)
-
+            if target in st.session_state: st.session_state[target] = number_to_vn_money(digits)
+    
+    # Format Diện tích
     elif ("area" in ft or "spell_area:" in ft) and digits_and_comma:
         pts = digits_and_comma.split(",")
         fmt = f"{int(pts[0]):,}".replace(",", ".") if pts[0] else ""
@@ -71,22 +83,22 @@ def process_field_change(ph, d_lower, field_types, mapping):
 
         if "spell_area:" in ft:
             target = re.split(r"^spell_area\s*:", ft, flags=re.IGNORECASE)[1].strip()
-            if target in st.session_state:
-                st.session_state[target] = number_to_vn_decimal(digits_and_comma)
+            if target in st.session_state: st.session_state[target] = number_to_vn_decimal(digits_and_comma)
 
+    # Viết hoa Tên & Tạo Auto ID
     elif is_name_desc(d_lower) and val:
         st.session_state[ph] = vi_title_name(val)
         initials = "".join([w[0].upper() for w in val.split() if w])
         auto_id = f"{initials}-{datetime.now().strftime('%d%m%y')}-001"
         for p, d in mapping.items():
-            if "mã" in d.lower() and "hồ sơ" in d.lower():
-                st.session_state[p] = auto_id
+            if "mã" in d.lower() and "hồ sơ" in d.lower(): st.session_state[p] = auto_id
 
+    # Format Ngày tháng
     elif "date" in ft and len(digits) >= 8:
         st.session_state[ph] = f"{digits[:2]}/{digits[2:4]}/{digits[4:8]}"
 
 # ==========================================
-# CALLBACK: ÁP DỤNG PHƯƠNG ÁN
+# CALLBACK: ÁP DỤNG PHƯƠNG ÁN (SỬ DỤNG REGEX THÔNG MINH)
 # ==========================================
 def apply_plan_callback(selected_pa, ma_pa, df_pa_data, mapping):
     mask = df_pa_data['Mã phương án'].astype(str).str.strip().str.lower() == str(ma_pa).strip().lower()
@@ -100,22 +112,28 @@ def apply_plan_callback(selected_pa, ma_pa, df_pa_data, mapping):
         if "tên phương án" in ds.lower() or k_var in ["tenphuongan", "ten_pa"]:
             st.session_state[ph] = selected_pa
 
+        # Điền Chi Phí
         for i, (_, row) in enumerate(df_cp.iterrows(), 1):
-            if pd.notna(row.get('Tỉ lệ')):
-                rate = str(round(float(row['Tỉ lệ']) * 100, 2)).rstrip('0').rstrip('.')
-                if k_var == f"tlcp{i}": st.session_state[ph] = rate
-            if k_var == f"hmcp{i}": st.session_state[ph] = str(row.get('Hạng mục', ''))
-            if k_var == f"ndcp{i}": st.session_state[ph] = str(row.get('Nội dung chi tiết', ''))
+            rate = str(round(float(row['Tỉ lệ']) * 100, 2)).rstrip('0').rstrip('.') if pd.notna(row.get('Tỉ lệ')) else ""
+            hm = str(row['Hạng mục']) if pd.notna(row.get('Hạng mục')) else ""
+            nd = str(row['Nội dung chi tiết']) if pd.notna(row.get('Nội dung chi tiết')) else ""
+            
+            if re.match(fr"^(?:t\.cp|tcp|tlcp){i}$", k_var) and rate: st.session_state[ph] = rate
+            if re.match(fr"^(?:hm_cp|hmcp){i}$", k_var) and hm: st.session_state[ph] = hm
+            if re.match(fr"^(?:nd_cp|nd_chiphi|ndcp){i}$", k_var) and nd: st.session_state[ph] = nd
 
+        # Điền Thu Nhập
         for i, (_, row) in enumerate(df_tn.iterrows(), 1):
-            if pd.notna(row.get('Tỉ lệ')):
-                rate = str(round(float(row['Tỉ lệ']) * 100, 2)).rstrip('0').rstrip('.')
-                if k_var == f"tltn{i}": st.session_state[ph] = rate
-            if k_var == f"hmtn{i}": st.session_state[ph] = str(row.get('Hạng mục', ''))
-            if k_var == f"ndtn{i}": st.session_state[ph] = str(row.get('Nội dung chi tiết', ''))
+            rate = str(round(float(row['Tỉ lệ']) * 100, 2)).rstrip('0').rstrip('.') if pd.notna(row.get('Tỉ lệ')) else ""
+            hm = str(row['Hạng mục']) if pd.notna(row.get('Hạng mục')) else ""
+            nd = str(row['Nội dung chi tiết']) if pd.notna(row.get('Nội dung chi tiết')) else ""
+            
+            if re.match(fr"^(?:t\.tn|ttn|tltn){i}$", k_var) and rate: st.session_state[ph] = rate
+            if re.match(fr"^(?:hm_tn|hmtn){i}$", k_var) and hm: st.session_state[ph] = hm
+            if re.match(fr"^(?:nd_tn|nd_thunhap|ndtn){i}$", k_var) and nd: st.session_state[ph] = nd
 
 # ==========================================
-# CẤU HÌNH GIAO DIỆN CHÍNH
+# GIAO DIỆN CHÍNH
 # ==========================================
 st.set_page_config(page_title="Hồ Sơ Tín Dụng Online", page_icon="🏦", layout="wide")
 
@@ -130,9 +148,6 @@ st.markdown("""
 st.title("🏦 HỆ THỐNG KHỞI TẠO HỒ SƠ TÍN DỤNG")
 st.caption("HOÀNG VIỆT HƯNG - QTDND PHÙNG HƯNG")
 
-# ==========================================
-# SIDEBAR: CẤU HÌNH & QUÉT QR ĐÍCH DANH
-# ==========================================
 with st.sidebar:
     st.header("⚙️ CẤU HÌNH ĐẦU VÀO")
     excel_file = st.file_uploader("1. File Data.xlsx", type=["xlsx"])
@@ -146,7 +161,7 @@ with st.sidebar:
         with open("temp_data.xlsx", "wb") as f: f.write(excel_file.getbuffer())
         mapping, field_types, tabs_dict = read_mapping("temp_data.xlsx")
         
-        # SỬA LỖI: Gắn cứng 4 đối tượng theo đúng nghiệp vụ tín dụng bạn yêu cầu
+        # Danh sách 4 đối tượng cố định theo yêu cầu của Hùng
         subjects = [
             "Tất cả",
             "Thành viên",
@@ -165,35 +180,26 @@ with st.sidebar:
                 for ph, ds in mapping.items():
                     d_low = str(ds).lower()
                     
-                    # Logic quyết định xem có rót dữ liệu vào ô này hay không
-                    # Nếu chọn "Tất cả" -> Rót hết
-                    # Nếu chọn 1 đối tượng cụ thể -> Chỉ rót vào ô có chứa đúng tên đối tượng đó trong phần Mô tả (Description) của Excel
-                    if target_person == "Tất cả" or target_person.lower() in d_low:
+                    # CƠ CHẾ CHỐNG GHI ĐÈ
+                    if is_target_match(target_person, d_low):
                         if is_cccd_desc(d_low): st.session_state[ph] = info.get("CCCD", "")
                         elif is_name_desc(d_low): 
                             st.session_state[ph] = vi_title_name(info.get("Ho_va_ten", ""))
-                            initials = "".join([w[0].upper() for w in info.get("Ho_va_ten", "").split() if w])
-                            if initials:
-                                for p, dd in mapping.items():
-                                    if "mã" in dd.lower() and "hồ sơ" in dd.lower():
-                                        st.session_state[p] = f"{initials}-{datetime.now().strftime('%d%m%y')}-001"
                         elif is_dob_desc(d_low): st.session_state[ph] = info.get("Ngay_thang_nam_sinh", "")
                         elif is_addr_desc(d_low): st.session_state[ph] = info.get("Dia_chi", "")
                         elif is_issue_desc(d_low): st.session_state[ph] = info.get("Ngay_cap_CCCD", "")
                         elif is_gender_desc(d_low): st.session_state[ph] = info.get("Gioi_tinh", "")
                 
-                st.success(f"Đã nạp dữ liệu cho: {target_person}")
+                st.success(f"Đã điền thành công dữ liệu cho: {target_person}")
                 st.rerun()
             except Exception as e: st.error(f"Lỗi đọc QR: {e}")
 
-# ==========================================
-# KHU VỰC RENDER FORM
-# ==========================================
 if excel_file and docx_file:
+    # 1. Khởi tạo mọi key
     for ph in mapping.keys():
-        if ph not in st.session_state:
-            st.session_state[ph] = ""
+        if ph not in st.session_state: st.session_state[ph] = ""
 
+    # 2. Logic Phương Án
     if pa_file:
         df_pa_list = pd.read_excel(pa_file, sheet_name="phuongan")
         df_pa_data = pd.read_excel(pa_file, sheet_name="data")
@@ -211,6 +217,7 @@ if excel_file and docx_file:
 
     st.divider()
 
+    # 3. Vẽ Form & Tabs
     unique_tabs = list(dict.fromkeys(tabs_dict.values()))
     st_tabs = st.tabs(unique_tabs)
     tab_obj = dict(zip(unique_tabs, st_tabs))
@@ -218,7 +225,6 @@ if excel_file and docx_file:
     for tab_name in unique_tabs:
         with tab_obj[tab_name]:
             fields_in_tab = [(ph, ds) for ph, ds in mapping.items() if tabs_dict.get(ph) == tab_name]
-            
             col1, col2 = st.columns(2)
             cols = [col1, col2]
             c_idx = 0
@@ -226,10 +232,9 @@ if excel_file and docx_file:
             for ph, ds in fields_in_tab:
                 d_lower = str(ds).lower()
                 is_tall = any(k in d_lower for k in LONG_TEXT_HINTS)
+                cb_kwargs = {"ph": ph, "d_lower": d_lower, "field_types": field_types, "mapping": mapping}
                 
                 with cols[c_idx]:
-                    cb_kwargs = {"ph": ph, "d_lower": d_lower, "field_types": field_types, "mapping": mapping}
-                    
                     if is_noicap_desc(d_lower) or is_loan_type_desc(d_lower):
                         opts = NOICAP_OPTIONS if is_noicap_desc(d_lower) else LOAN_TYPE_OPTIONS
                         st.selectbox(ds, [""] + opts, key=ph, on_change=process_field_change, kwargs=cb_kwargs)
@@ -242,12 +247,9 @@ if excel_file and docx_file:
                             st.selectbox(ds, [""] + opts, key=ph, on_change=process_field_change, kwargs=cb_kwargs)
                         else:
                             st.text_input(ds, key=ph, on_change=process_field_change, kwargs=cb_kwargs)
-                            
                 c_idx = 1 - c_idx
 
-    # ==========================================
-    # LOGIC XUẤT FILE WORD TỔNG HỢP
-    # ==========================================
+    # 4. Xuất File
     st.divider()
     if st.button("🚀 TẠO HỒ SƠ WORD TỔNG HỢP", type="primary", use_container_width=True):
         ctx = {}
