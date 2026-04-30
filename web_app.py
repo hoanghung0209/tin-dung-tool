@@ -2,175 +2,202 @@ import os
 import io
 import json
 import re
+import logging
 from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-# Import từ các file core mà chúng ta đã xây dựng
+# Import từ các file core
 from config import NOICAP_OPTIONS, LOAN_TYPE_OPTIONS, LONG_TEXT_HINTS
 from core.utils import (
     vi_title_name, parse_cccd_payload, validate_cccd_12_digits,
     var_name, is_cccd_desc, is_noicap_desc, is_loan_type_desc, 
     is_name_desc, is_dob_desc, is_issue_desc, is_addr_desc, is_gender_desc,
-    format_money_vi
+    format_money_vi, parse_number_vi, parse_percent_vi
 )
 from core.scanner import decode_qr_offline
 from core.document import read_mapping, generate_word_document
 
-# --- CẤU HÌNH GIAO DIỆN WEB ---
-st.set_page_config(page_title="Hồ Sơ Tín Dụng", page_icon="🏦", layout="wide")
-st.title("🏦 HỆ THỐNG KHỞI TẠO HỒ SƠ TÍN DỤNG (WEB)")
-st.markdown("**HOÀNG VIỆT HƯNG - QTDND PHÙNG HƯNG**")
+# --- CẤU HÌNH TRANG ---
+st.set_page_config(page_title="Hồ Sơ Tín Dụng Online", page_icon="🏦", layout="wide")
 
-# Khởi tạo bộ nhớ tạm (Session State) để không bị mất chữ khi web tải lại
+# --- CSS TÙY CHỈNH ĐỂ GIAO DIỆN SẮC NÉT HƠN ---
+st.markdown("""
+    <style>
+    .stTextInput input, .stTextArea textarea, .stSelectbox select {
+        border: 1px solid #979DA2 !important;
+    }
+    [data-testid="stExpander"] {
+        border: 1px solid #2980B9 !important;
+        background-color: #F8F9F9;
+    }
+    </style>
+    """, unsafe_allow_width=True)
+
+# --- KHỞI TẠO SESSION STATE (BỘ NHỚ TẠM) ---
 if "form_data" not in st.session_state:
     st.session_state.form_data = {}
+if "last_plan" not in st.session_state:
+    st.session_state.last_plan = None
 
 # ==========================================
-# SIDEBAR: KHU VỰC TẢI DỮ LIỆU & QUÉT QR
+# SIDEBAR: CẤU HÌNH & FILE
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ CẤU HÌNH ĐẦU VÀO")
-    excel_file = st.file_uploader("1. Tải file Data (Excel)", type=["xlsx", "xls"])
-    docx_file = st.file_uploader("2. Tải file Mẫu (Word)", type=["docx"])
+    st.title("⚙️ HỆ THỐNG LÕI")
+    excel_file = st.file_uploader("1. File Data (Excel)", type=["xlsx"])
+    docx_file = st.file_uploader("2. Mẫu Word (.docx)", type=["docx"])
+    pa_file = st.file_uploader("3. Danh mục Phương án (Excel)", type=["xlsx"])
     
     st.divider()
-    st.header("📸 QUÉT CCCD TỰ ĐỘNG")
-    qr_file = st.file_uploader("Tải ảnh CCCD để tự động điền", type=["png", "jpg", "jpeg"])
-    if qr_file and st.button("Tiến hành quét mã", type="primary"):
-        with open("temp_qr.jpg", "wb") as f:
-            f.write(qr_file.getbuffer())
+    st.header("📸 QUÉT CCCD")
+    qr_file = st.file_uploader("Tải ảnh CCCD", type=["png", "jpg", "jpeg"])
+    if qr_file and st.button("🚀 TIẾN HÀNH QUÉT", type="primary"):
+        with open("temp_qr.jpg", "wb") as f: f.write(qr_file.getbuffer())
         try:
             info = parse_cccd_payload(decode_qr_offline("temp_qr.jpg"))
-            if not validate_cccd_12_digits(info.get("CCCD", "")):
-                st.warning("CCCD quét được không đủ 12 số, hãy kiểm tra lại!")
-            
-            # Đổ dữ liệu quét được vào bộ nhớ tạm để tự hiện lên form
-            for key, val in info.items():
-                st.session_state.form_data[f"qr_{key}"] = val
-            st.success("Quét thành công! Dữ liệu đã được nạp vào form.")
-        except Exception as e:
-            st.error(f"Không thể đọc mã QR: {e}")
+            st.session_state.form_data["qr_CCCD"] = info.get("CCCD", "")
+            st.session_state.form_data["qr_Ho_va_ten"] = info.get("Ho_va_ten", "")
+            st.session_state.form_data["qr_Ngay_thang_nam_sinh"] = info.get("Ngay_thang_nam_sinh", "")
+            st.session_state.form_data["qr_Dia_chi"] = info.get("Dia_chi", "")
+            st.session_state.form_data["qr_Ngay_cap_CCCD"] = info.get("Ngay_cap_CCCD", "")
+            st.session_state.form_data["qr_Gioi_tinh"] = info.get("Gioi_tinh", "")
+            st.success("Đã nạp dữ liệu QR!")
+            st.rerun()
+        except Exception as e: st.error(f"Lỗi: {e}")
 
 # ==========================================
-# KHU VỰC CHÍNH: RENDER FORM TỪ EXCEL
+# CHỨC NĂNG TỰ ĐỘNG FILL PHƯƠNG ÁN
+# ==========================================
+def apply_plan_data(selected_pa, df_pa_data, mapping):
+    try:
+        mask = df_pa_data['Mã phương án'].astype(str).str.strip().lower() == selected_pa.lower()
+        plan_rows = df_pa_data[mask]
+        
+        # Reset các ô tài chính cũ
+        for k in list(st.session_state.form_data.keys()):
+            if any(x in k.lower() for x in ["cp", "tn", "hm", "nd"]):
+                st.session_state.form_data[k] = ""
+
+        df_cp = plan_rows[plan_rows['Loại'].astype(str).str.contains('chi|phí|cp', case=False, na=False)]
+        df_tn = plan_rows[plan_rows['Loại'].astype(str).str.contains('lợi|nhuận|thu|nhập|ln|tn', case=False, na=False)]
+
+        # Điền Tỷ lệ Chi phí
+        for i, (_, row) in enumerate(df_cp.iterrows(), 1):
+            rate = str(round(float(row['Tỉ lệ']) * 100, 2)).rstrip('0').rstrip('.')
+            for ph in mapping.keys():
+                k_var = var_name(ph).lower()
+                if k_var == f"tlcp{i}": st.session_state[f"w_{ph}"] = rate
+                if k_var == f"hmcp{i}": st.session_state[f"w_{ph}"] = str(row['Hạng mục'])
+
+        # Điền Tỷ lệ Thu nhập
+        for i, (_, row) in enumerate(df_tn.iterrows(), 1):
+            rate = str(round(float(row['Tỉ lệ']) * 100, 2)).rstrip('0').rstrip('.')
+            for ph in mapping.keys():
+                k_var = var_name(ph).lower()
+                if k_var == f"tltn{i}": st.session_state[f"w_{ph}"] = rate
+                if k_var == f"hmtn{i}": st.session_state[f"w_{ph}"] = str(row['Hạng mục'])
+    except: pass
+
+# ==========================================
+# HIỂN THỊ FORM CHÍNH
 # ==========================================
 if excel_file and docx_file:
-    # Lưu file mẫu ra nháp để xử lý
     with open("temp_data.xlsx", "wb") as f: f.write(excel_file.getbuffer())
     with open("temp_template.docx", "wb") as f: f.write(docx_file.getbuffer())
     
-    try:
-        mapping, field_types, tabs_dict = read_mapping("temp_data.xlsx")
-    except Exception as e:
-        st.error(f"Lỗi đọc file Excel: {e}")
-        st.stop()
+    mapping, field_types, tabs_dict = read_mapping("temp_data.xlsx")
+    
+    # Khu vực chọn Phương án
+    if pa_file:
+        df_pa_list = pd.read_excel(pa_file, sheet_name="phuongan")
+        df_pa_data = pd.read_excel(pa_file, sheet_name="data")
+        pa_options = dict(zip(df_pa_list['Tên PA'], df_pa_list['Mã PA']))
+        
+        selected_plan_name = st.selectbox("⚡ CHỌN PHƯƠNG ÁN VAY VỐN:", ["-- Chọn phương án --"] + list(pa_options.keys()))
+        
+        if selected_plan_name != "-- Chọn phương án --" and selected_plan_name != st.session_state.last_plan:
+            apply_plan_data(pa_options[selected_plan_name], df_pa_data, mapping)
+            st.session_state.last_plan = selected_plan_name
+            st.rerun()
 
-    # Xây dựng hệ thống Tab
+    # Tạo Tabs
     unique_tabs = list(dict.fromkeys(tabs_dict.values()))
     st_tabs = st.tabs(unique_tabs)
-    tab_objs = dict(zip(unique_tabs, st_tabs))
+    tab_map = dict(zip(unique_tabs, st_tabs))
+    
+    # Thuật toán Grid 2 cột
+    tab_occupancy = {t: set() for t in unique_tabs}
+    tab_row = {t: 0 for t in unique_tabs}
 
-    idx = 1
-    current_row_cols = None
-    col_idx = 0
-
-    st.markdown("---")
-    st.subheader("📝 NHẬP LIỆU CHI TIẾT HỒ SƠ")
-
-    # Vòng lặp vẽ giao diện Tetris-Grid 2 cột
     for ph, ds in mapping.items():
         d = str(ds).lower()
         tn = tabs_dict.get(ph, "Thông tin chung")
-        is_tall = any(k in d for k in LONG_TEXT_HINTS)
+        is_tall = any(k in d for k in ["địa chỉ", "nội dung", "mục đích", "phương án", "tài sản"])
         
-        # Tiêm dữ liệu từ QR (nếu có)
-        default_val = st.session_state.form_data.get(ph, "")
-        if is_cccd_desc(d): default_val = st.session_state.form_data.get("qr_CCCD", default_val)
-        elif is_name_desc(d): default_val = vi_title_name(st.session_state.form_data.get("qr_Ho_va_ten", default_val))
-        elif is_dob_desc(d): default_val = st.session_state.form_data.get("qr_Ngay_thang_nam_sinh", default_val)
-        elif is_addr_desc(d): default_val = st.session_state.form_data.get("qr_Dia_chi", default_val)
-        elif is_issue_desc(d): default_val = st.session_state.form_data.get("qr_Ngay_cap_CCCD", default_val)
-        elif is_gender_desc(d): default_val = st.session_state.form_data.get("qr_Gioi_tinh", default_val)
+        # Xử lý dữ liệu mặc định từ QR hoặc Session
+        val = st.session_state.get(f"w_{ph}", "")
+        if is_cccd_desc(d): val = st.session_state.form_data.get("qr_CCCD", val)
+        elif is_name_desc(d): val = vi_title_name(st.session_state.form_data.get("qr_Ho_va_ten", val))
+        elif is_dob_desc(d): val = st.session_state.form_data.get("qr_Ngay_thang_nam_sinh", val)
+        elif is_addr_desc(d): val = st.session_state.form_data.get("qr_Dia_chi", val)
 
-        label_text = f"{idx}. {ds}"
+        with tab_map[tn]:
+            # Tìm vị trí trống trong lưới
+            r, c = tab_row[tn], 0
+            while (r, c) in tab_occupancy[tn]:
+                c += 1
+                if c > 1: c=0; r+=1
+            tab_row[tn] = r
+            
+            rs = 2 if is_tall else 1
+            for _r in range(r, r + rs): tab_occupancy[tn].add((_r, c))
 
-        with tab_objs[tn]:
-            if is_tall:
-                # Textbox dài: Rớt dòng, chiếm trọn màn hình
-                st.session_state.form_data[ph] = st.text_area(label_text, value=default_val, height=100, key=f"widget_{ph}")
-                current_row_cols = None 
-                col_idx = 0
-            else:
-                # Các ô ngắn: Xếp zic-zắc 2 cột
-                if current_row_cols is None or col_idx == 2:
-                    current_row_cols = st.columns(2)
-                    col_idx = 0
-                
-                with current_row_cols[col_idx]:
-                    if is_noicap_desc(d) or is_loan_type_desc(d):
-                        options = NOICAP_OPTIONS if is_noicap_desc(d) else LOAN_TYPE_OPTIONS
-                        st.session_state.form_data[ph] = st.selectbox(label_text, options=[""] + options, index=0, key=f"widget_{ph}")
-                    else:
-                        ft_val = str(field_types.get(ph, "")).lower()
-                        if ft_val.startswith("dropdown:"):
-                            opts = [o.strip() for o in ft_val.split(":")[1].split(",")]
-                            st.session_state.form_data[ph] = st.selectbox(label_text, options=[""] + opts, index=0, key=f"widget_{ph}")
-                        else:
-                            st.session_state.form_data[ph] = st.text_input(label_text, value=default_val, key=f"widget_{ph}")
-                col_idx += 1
-        idx += 1
+            # Render UI
+            if c == 0: cols = st.columns(2) # Chỉ tạo column mới khi ở cột đầu
+            
+            with st.container(): # Dùng container để bọc các widget cùng cột
+                if is_tall:
+                    st.session_state[f"w_{ph}"] = st.text_area(f"{ds}", value=val, height=110, key=f"input_{ph}")
+                elif is_noicap_desc(d) or is_loan_type_desc(d):
+                    opts = NOICAP_OPTIONS if is_noicap_desc(d) else LOAN_TYPE_OPTIONS
+                    st.session_state[f"w_{ph}"] = st.selectbox(f"{ds}", [""] + opts, key=f"input_{ph}")
+                else:
+                    st.session_state[f"w_{ph}"] = st.text_input(f"{ds}", value=val, key=f"input_{ph}")
 
-    st.markdown("---")
-    
-    # Nút Xuất File
-    if st.button("🚀 TẠO HỒ SƠ (WORD)", type="primary", use_container_width=True):
-        # 1. Thu thập và tự động format tiền tệ trước khi xuất
+    # ==========================================
+    # NÚT XUẤT FILE & LOGIC TÀI CHÍNH
+    # ==========================================
+    st.divider()
+    if st.button("🚀 XUẤT HỒ SƠ WORD", type="primary", use_container_width=True):
         ctx = {}
+        # Thu thập dữ liệu và định dạng tiền tệ
         for ph, ds in mapping.items():
-            raw_val = str(st.session_state.form_data.get(ph, "")).strip()
+            raw = str(st.session_state.get(f"input_{ph}", "")).strip()
+            d_low = ds.lower()
             
-            # Format tự động cho CCCD và Tiền tệ
-            d = str(ds).lower()
-            if is_cccd_desc(d): 
-                raw_val = "".join(ch for ch in raw_val if ch.isdigit())
+            # Format tiền tự động cho các trường tài chính
+            money_kws = ["doanh thu", "thu nhập", "chi phí", "số tiền", "giá trị", "vốn", "định giá", "lãi"]
+            if any(kw in d_low for kw in money_kws) and raw.replace(".","").isdigit():
+                raw = format_money_vi(raw.replace(".",""))
             
-            # Mắt thần định dạng tiền (Gõ 100000 -> Tự xuất 100.000)
-            money_kws = ["doanh thu", "thu nhập", "tổng thu", "lợi nhuận", "chi phí", "số tiền", "giá trị", "vốn", "định giá", "tài sản", "dư nợ", "lãi", "giá"]
-            is_money_field = "money" in str(field_types.get(ph, "")).lower() or any(kw in d for kw in money_kws)
-            if is_money_field and raw_val.isdigit():
-                raw_val = format_money_vi(raw_val)
+            ctx[var_name(ph)] = raw
 
-            ctx[var_name(ph)] = raw_val
-
-        # 2. Sinh mã Auto-ID
-        name = ctx.get(var_name(next((p for p, d in mapping.items() if is_name_desc(d.lower())), "")), "")
-        if name:
-            initials = "".join([word[0].upper() for word in name.split() if word])
+        # Sinh Auto-ID
+        name_key = next((p for p, d in mapping.items() if is_name_desc(d.lower())), None)
+        if name_key:
+            name = st.session_state.get(f"input_{name_key}", "")
+            initials = "".join([w[0].upper() for word in name.split() if w])
             auto_id = f"{initials}-{datetime.now().strftime('%d%m%y')}-001"
             for ph, ds in mapping.items():
-                if "mã" in ds.lower() and ("hồ sơ" in ds.lower() or "hscv" in ds.lower()):
-                    ctx[var_name(ph)] = auto_id
+                if "mã" in ds.lower() and "hồ sơ" in ds.lower(): ctx[var_name(ph)] = auto_id
 
-        # 3. Tạo file Word trên RAM (Không lưu xuống cứng)
-        try:
-            output_stream = io.BytesIO()
-            generate_word_document("temp_template.docx", output_stream, ctx)
-            output_stream.seek(0)
-            
-            member_name = safe_filename(name) or "HoSoTinDung"
-            file_name = f"{member_name}_{datetime.now().strftime('%H%M')}.docx"
-            
-            st.success("🎉 Tạo hồ sơ thành công! Bấm nút bên dưới để tải về máy.")
-            st.download_button(
-                label="📥 TẢI XUỐNG FILE WORD",
-                data=output_stream,
-                file_name=file_name,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary"
-            )
-        except Exception as e:
-            st.error(f"Lỗi tạo file: {e}")
+        # Render Word
+        output = io.BytesIO()
+        generate_word_document("temp_template.docx", output, ctx)
+        output.seek(0)
+        st.success("Đã tạo file thành công!")
+        st.download_button("📥 TẢI FILE WORD VỀ MÁY", data=output, file_name=f"HoSo_{datetime.now().strftime('%H%M')}.docx")
 
 else:
-    st.info("👈 Hãy tải lên file Data (Excel) và file Mẫu (Word) ở thanh Sidebar bên trái để bắt đầu.")
+    st.info("💡 Vui lòng tải đủ 2 file Data.xlsx và HSCV.docx ở cột bên trái để bắt đầu làm việc.")
