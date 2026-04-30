@@ -3,5 +3,7 @@ pandas
 openpyxl
 docxtpl
 num2words
-pyzbar
 Pillow
+numpy
+opencv-python-headless
+zxingcpp
