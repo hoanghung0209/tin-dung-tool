@@ -4,6 +4,6 @@ openpyxl==3.1.5
 docxtpl==0.20.0
 num2words==0.5.14
 Pillow==11.2.1
-numpy==2.2.6
-opencv-python-headless==4.12.0.88
-zxing-cpp==2.3.0
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+zxing-cpp==2.2.0
