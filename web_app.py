@@ -10,7 +10,8 @@ from docxtpl import DocxTemplate, RichText
 from config import NOICAP_OPTIONS, LOAN_TYPE_OPTIONS, LONG_TEXT_HINTS
 from core.utils import (
     vi_title_name, parse_cccd_payload, validate_cccd_12_digits,
-    var_name
+    var_name, is_cccd_desc, is_noicap_desc, is_loan_type_desc, 
+    is_name_desc, is_dob_desc, is_issue_desc, is_addr_desc, is_gender_desc
 )
 from core.scanner import decode_qr_offline
 from core.document import read_mapping
@@ -18,15 +19,14 @@ from core.document import read_mapping
 st.set_page_config(page_title="Hồ Sơ Tín Dụng Pro", page_icon="🏦", layout="wide")
 st.markdown("""
     <style>
-    div[data-baseweb="input"] > div, div[data-baseweb="textarea"] > div, div[data-baseweb="select"] > div { 
-        border: 1px solid #2980B9; border-radius: 4px; 
-    }
-    .stExpander { border: 2px solid #e0e0e0; border-radius: 8px; margin-bottom: 10px; }
+    div[data-baseweb="input"] > div { border: 1px solid #2980B9; border-radius: 4px; }
+    div[data-baseweb="textarea"] > div { border: 1px solid #2980B9; border-radius: 4px; }
+    div[data-baseweb="select"] > div { border: 1px solid #2980B9; border-radius: 4px; }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. HÀM XỬ LÝ TIỀN TỆ & TOÁN HỌC CHUẨN
+# 1. HÀM XỬ LÝ TIỀN TỆ & TOÁN HỌC
 # ==========================================
 def extract_number(val):
     if not val: return 0
@@ -35,8 +35,10 @@ def extract_number(val):
 
 def extract_float(val):
     if not val: return 0.0
-    c = "".join(x for x in str(val) if x.isdigit() or x in ",.")
-    return float(c.replace(",", ".")) if c else 0.0
+    c = str(val).replace(",", ".")
+    c = "".join(x for x in c if x.isdigit() or x == ".")
+    try: return float(c)
+    except: return 0.0
 
 def format_currency(val):
     return f"{int(val):,}".replace(",", ".")
@@ -45,70 +47,48 @@ def format_percent(val):
     s = f"{val:.4f}".rstrip("0").rstrip(".")
     return "0" if not s else s.replace(".", ",")
 
-def num_to_text_area(text_val):
-    try:
-        from num2words import num2words
-        if not text_val: return ""
-        parts = str(text_val).split(",")
-        int_txt = num2words(int(parts[0]) if parts[0] else 0, lang="vi").replace("-", " ")
-        if len(parts) < 2: return int_txt[0].upper() + int_txt[1:] + " mét vuông."
-        dec_part = parts[1]
-        leading_zeros = "".join(["không " for char in dec_part if char == '0' and not dec_part[:dec_part.find(char)].replace('0','') ])
-        dec_num = int(dec_part)
-        dec_txt = leading_zeros + (num2words(dec_num, lang="vi").replace("-", " ") if dec_num > 0 else "")
-        final_txt = f"{int_txt} phẩy {dec_txt}".strip()
-        return final_txt[0].upper() + final_txt[1:] + " mét vuông."
-    except: return ""
-
 # ==========================================
-# 2. ĐỘNG CƠ TÍNH TOÁN TÀI CHÍNH (SỬA LỖI TỔNG VỐN)
+# 2. ĐỘNG CƠ TÍNH TOÁN TÀI CHÍNH
 # ==========================================
-def calculate_globals(mapping, field_types):
+def execute_financial_engine(mapping, field_types):
     tvdt_keys = []
     ls_thang_keys = []
     vay_val = 0
     tuco_val = 0
     ls_nam_val = 0.0
 
-    # BƯỚC 1: Quét tìm các biến độc lập
+    # 1. Tìm các biến số quan trọng
     for ph, ds in mapping.items():
         kv = var_name(ph).lower().replace("_", "")
         d_low = ds.lower()
         val = str(st.session_state.get(ph, "")).strip()
 
-        # Tiền vay
         if any(x in kv for x in ["vay", "xinvay", "mucvay"]) and not any(x in kv for x in ["tong", "ls", "lai", "thoi", "ngay", "loai"]): 
             vay_val = max(vay_val, extract_number(val))
-        # Vốn tự có
         elif any(x in kv for x in ["tuco", "vonthamgia", "vontc"]): 
             tuco_val = max(tuco_val, extract_number(val))
-        # Tổng vốn
         elif any(x in kv for x in ["tongvon", "tvdt", "tongmucdautu", "tongchiphi", "tongsovon"]): 
             tvdt_keys.append(ph)
-        # Lãi suất
         elif ("ls" in kv or "laisuat" in kv) and "năm" in d_low: 
             ls_nam_val = max(ls_nam_val, extract_float(val))
         elif ("ls" in kv or "laisuat" in kv) and "tháng" in d_low: 
             ls_thang_keys.append(ph)
 
-    # BƯỚC 2: Tính toán Lãi và Tổng vốn chuẩn xác
+    # 2. Tính Tổng Vốn & Lãi tháng
     total_capital = vay_val + tuco_val
     
-    # Ghi đè vào các ô Tổng vốn
     if total_capital > 0:
         for k in tvdt_keys:
             st.session_state[k] = format_currency(total_capital)
     else:
-        # Nếu chưa gõ Vay/Tự có nhưng đã gõ Tổng vốn
         for k in tvdt_keys:
             total_capital = max(total_capital, extract_number(st.session_state.get(k, "0")))
 
-    # Tính lãi tháng
     if ls_nam_val > 0:
         for k in ls_thang_keys:
             st.session_state[k] = format_percent(ls_nam_val / 12.0)
 
-    # BƯỚC 3: Rót tiền cho Phương án (Tự động nhân tỷ lệ)
+    # 3. Rót tiền Phương án
     if total_capital > 0:
         for ph, ds in mapping.items():
             kv = var_name(ph).lower().replace("_", "")
@@ -119,7 +99,6 @@ def calculate_globals(mapping, field_types):
             base = kv[:-len(idx)]
             
             if base in ["stcp", "sotiencp", "cp", "chiphi", "tien", "sotien", "sttn", "sotientn", "tn", "thunhap", "dt", "stdt", "doanhthu"]:
-                # Tìm ô Tỷ lệ tương ứng
                 prefix = "tlcp" if any(x in base for x in ["cp", "chiphi"]) else "tltn" if any(x in base for x in ["tn", "thunhap", "dt", "doanhthu"]) else None
                 if not prefix: 
                     prefix = "tlcp" if "chi phí" in ds.lower() else "tltn" if "thu nhập" in ds.lower() else None
@@ -130,7 +109,7 @@ def calculate_globals(mapping, field_types):
                         rate = extract_float(st.session_state.get(rate_ph, "0"))
                         if rate > 0: st.session_state[ph] = format_currency(total_capital * rate / 100)
 
-    # BƯỚC 4: Dịch tiền ra chữ
+    # 4. Spell (Dịch số ra chữ)
     for ph, ds in mapping.items():
         ft = str(field_types.get(ph, "")).strip().lower()
         if "spell:" in ft:
@@ -144,36 +123,27 @@ def calculate_globals(mapping, field_types):
                 except: pass
 
 # ==========================================
-# 3. ĐIỀU HƯỚNG TƯƠNG TÁC (CALLBACKS)
+# 3. SỰ KIỆN GÕ PHÍM & BỘ LỌC CCCD
 # ==========================================
 def field_callback(ph, ds, field_types, mapping):
     val = str(st.session_state.get(ph, ""))
     d_low = ds.lower()
-    ft = str(field_types.get(ph, "")).lower()
     
     if "lãi suất" in d_low or "lãi" in d_low or "tỷ lệ" in d_low or "ls" in var_name(ph).lower():
         st.session_state[ph] = "".join(c for c in val if c.isdigit() or c in ",.")
-    elif "money" in ft or any(k in d_low for k in ["số tiền", "vốn", "thu nhập", "chi phí", "giá trị", "doanh thu"]):
-        digits = extract_number(val)
-        if digits > 0: st.session_state[ph] = format_currency(digits)
-    elif "area" in ft or "spell_area:" in ft:
-        clean_val = "".join(c for c in val if c.isdigit() or c in ",.")
-        st.session_state[ph] = clean_val
-        if "spell_area:" in ft:
-            target = ft.split("spell_area:")[1].strip()
-            if target in st.session_state: st.session_state[target] = num_to_text_area(clean_val)
-    elif ("họ tên" in d_low or "họ và tên" in d_low) and val:
+    elif any(k in d_low for k in ["số tiền", "vốn", "thu nhập", "chi phí", "giá trị", "doanh thu"]):
+        digits = "".join(c for c in val if c.isdigit())
+        if digits: st.session_state[ph] = format_currency(digits)
+    elif "họ tên" in d_low or "họ và tên" in d_low:
         st.session_state[ph] = vi_title_name(val)
         
     execute_financial_engine(mapping, field_types)
 
-# ==========================================
-# 4. CHỐT CHẶN BẢO MẬT CCCD (CỰC KỲ NGHIÊM NGẶT)
-# ==========================================
 def get_cccd_field_type(ds):
-    """KHÓA TỬ HUYỆT: Từ chối mọi trường ngày cấp có chữ Sổ, Đất, Ruộng, GCN..."""
+    """KHÓA TỬ HUYỆT: Chặn đứng các trường đất đai, sổ ruộng khoán"""
     d = ds.lower()
     if any(x in d for x in ["sổ", "đất", "gcn", "giấy chứng nhận", "ruộng", "xe", "tsđb", "tài sản"]): return None
+    
     if any(x in d for x in ["ngày cấp", "cấp ngày", "ngay cap"]): return "issue_date"
     if any(x in d for x in ["cccd", "cmnd", "căn cước", "chứng minh", "định danh"]): return "cccd"
     if any(x in d for x in ["họ tên", "họ và tên", "người"]): return "name"
@@ -183,7 +153,7 @@ def get_cccd_field_type(ds):
     return None
 
 def firewall_qr_target(ph, ds):
-    """PHÂN VÙNG DỮ LIỆU: Cô lập tuyệt đối 5 đối tượng"""
+    """BẢO VỆ PHÂN VÙNG DỮ LIỆU"""
     text = f"{ds.lower()} | {var_name(ph).lower()}"
     if any(x in text for x in ["thụ hưởng", "thuhuong", "_th", "nhận tiền"]): return "Người thụ hưởng"
     if any(x in text for x in ["ủy quyền 2", "uyquyen2", "uq2"]): return "Người ủy quyền 2"
@@ -205,51 +175,43 @@ with st.sidebar:
     if file_data:
         with open("temp_data.xlsx", "wb") as f: f.write(file_data.getbuffer())
         mapping, field_types, tabs_dict = read_mapping("temp_data.xlsx")
-        st.session_state.field_types = field_types
         
-        # Khóa State
         for ph in mapping:
             if ph not in st.session_state: st.session_state[ph] = ""
             
         st.divider()
-        st.header("📸 BẢNG QUÉT CCCD SONG SONG")
+        st.header("📸 QUÉT CCCD ĐÍCH DANH")
         subjects = ["Thành viên", "Người đồng vay vốn 1", "Người ủy quyền 1", "Người ủy quyền 2", "Người thụ hưởng"]
+        target = st.selectbox("Chọn đối tượng:", subjects)
+        qr_img = st.file_uploader("Tải ảnh CCCD", type=["png", "jpg", "jpeg"])
         
-        for target in subjects:
-            with st.expander(f"👤 {target}", expanded=False):
-                qr_img = st.file_uploader(f"Ảnh CCCD", type=["png", "jpg", "jpeg"], key=f"qr_{target}")
-                if qr_img and st.button(f"🚀 Quét dữ liệu", key=f"btn_{target}", use_container_width=True):
-                    with open(f"temp_qr_{target}.jpg", "wb") as f: f.write(qr_img.getbuffer())
-                    try:
-                        info = parse_cccd_payload(decode_qr_offline(f"temp_qr_{target}.jpg"))
-                        count = 0
-                        for ph, ds in mapping.items():
-                            # Kiểm tra chéo 2 lớp: Phân vùng (firewall) và Loại trường (get_cccd_field)
-                            if firewall_qr_target(ph, ds) == target:
-                                cccd_field = get_cccd_field_type(ds)
-                                if cccd_field == "cccd": st.session_state[ph] = info.get("CCCD", "")
-                                elif cccd_field == "name": st.session_state[ph] = vi_title_name(info.get("Ho_va_ten", ""))
-                                elif cccd_field == "dob": st.session_state[ph] = info.get("Ngay_thang_nam_sinh", "")
-                                elif cccd_field == "address": st.session_state[ph] = info.get("Dia_chi", "")
-                                elif cccd_field == "issue_date": st.session_state[ph] = info.get("Ngay_cap_CCCD", "")
-                                elif cccd_field == "gender": st.session_state[ph] = info.get("Gioi_tinh", "")
-                                if cccd_field: count += 1
-                        
-                        execute_financial_engine(mapping, field_types)
-                        st.success(f"Nạp an toàn {count} trường cho: {target}")
-                        st.rerun()
-                    except Exception as e: 
-                        st.error(f"Lỗi đọc thẻ: {e}")
+        if qr_img and st.button("🚀 TIẾN HÀNH QUÉT", type="primary", use_container_width=True):
+            with open("temp_qr.jpg", "wb") as f: f.write(qr_img.getbuffer())
+            try:
+                info = parse_cccd_payload(decode_qr_offline("temp_qr.jpg"))
+                for ph, ds in mapping.items():
+                    if firewall_qr_target(ph, ds) == target:
+                        cccd_field = get_cccd_field_type(ds)
+                        if cccd_field == "cccd": st.session_state[ph] = info.get("CCCD", "")
+                        elif cccd_field == "name": st.session_state[ph] = vi_title_name(info.get("Ho_va_ten", ""))
+                        elif cccd_field == "dob": st.session_state[ph] = info.get("Ngay_thang_nam_sinh", "")
+                        elif cccd_field == "address": st.session_state[ph] = info.get("Dia_chi", "")
+                        elif cccd_field == "issue_date": st.session_state[ph] = info.get("Ngay_cap_CCCD", "")
+                        elif cccd_field == "gender": st.session_state[ph] = info.get("Gioi_tinh", "")
+                
+                execute_financial_engine(mapping, field_types)
+                st.success(f"Nạp xong cho: {target}")
+                st.rerun()
+            except Exception as e: st.error(f"Lỗi: {e}")
 
 if file_data and file_word:
-    # --- ÁP DỤNG PHƯƠNG ÁN (AUTO-FILL BẤT BẠI) ---
     if file_plan:
         df_list = pd.read_excel(file_plan, sheet_name="phuongan")
         df_data = pd.read_excel(file_plan, sheet_name="data")
         pa_map = dict(zip(df_list['Tên PA'], df_list['Mã PA']))
         
         c1, c2 = st.columns([3, 1])
-        with c1: sel_pa = st.selectbox("⚡ ĐIỀN TỰ ĐỘNG PHƯƠNG ÁN:", ["-- Trống --"] + list(pa_map.keys()))
+        with c1: sel_pa = st.selectbox("⚡ CHỌN PHƯƠNG ÁN:", ["-- Trống --"] + list(pa_map.keys()))
         with c2:
             st.write("")
             if st.button("ÁP DỤNG", type="primary", use_container_width=True):
@@ -261,37 +223,33 @@ if file_data and file_word:
                     
                     for ph, ds in mapping.items():
                         kv = var_name(ph).lower().replace("_", "")
-                        if "tenphuongan" in kv or "tenpa" in kv: 
-                            st.session_state[ph] = sel_pa
-                            continue
+                        if "tenphuongan" in kv or "tenpa" in kv: st.session_state[ph] = sel_pa
                         
-                        m = re.search(r'(\d+)$', kv)
-                        if not m: continue
-                        
-                        idx = int(m.group(1)) - 1
-                        base = kv[:-len(m.group(1))]
-                        
-                        # Phân loại là Chi phí hay Thu nhập dựa trên Mã biến hoặc Mô tả
-                        is_cp = any(x in base for x in ["cp", "chiphi"]) or "chi phí" in ds.lower()
-                        is_tn = any(x in base for x in ["tn", "thunhap", "dt", "doanhthu"]) or "thu nhập" in ds.lower() or "doanh thu" in ds.lower()
-                        
-                        target_df = df_cp if is_cp else df_tn if is_tn else None
-                        
-                        if target_df is not None and 0 <= idx < len(target_df):
-                            row = target_df.iloc[idx]
-                            rate = format_percent(float(row['Tỉ lệ']) * 100) if pd.notna(row.get('Tỉ lệ')) else ""
-                            hm = str(row.get('Hạng mục', '')).strip() if pd.notna(row.get('Hạng mục')) else ""
-                            nd = str(row.get('Nội dung chi tiết', '')).strip() if pd.notna(row.get('Nội dung chi tiết')) else ""
+                        for i, r in df_cp.iterrows():
+                            idx = str(i + 1)
+                            rate = format_percent(float(r['Tỉ lệ']) * 100) if pd.notna(r.get('Tỉ lệ')) else ""
+                            hm = str(r.get('Hạng mục', '')).strip() if pd.notna(r.get('Hạng mục')) else ""
+                            nd = str(r.get('Nội dung chi tiết', '')).strip() if pd.notna(r.get('Nội dung chi tiết')) else ""
                             
-                            if any(x in base for x in ["tl", "tyle", "tcp", "ttn"]): st.session_state[ph] = rate
-                            elif any(x in base for x in ["hm", "hangmuc"]): st.session_state[ph] = hm
-                            elif any(x in base for x in ["nd", "noidung", "chitiet"]): st.session_state[ph] = nd
-                            elif base in ["chiphi", "cp", "thunhap", "tn", "doanhthu", "dt"]: st.session_state[ph] = nd if not hm else f"{hm}: {nd}"
+                            if re.match(fr"^(?:tlcp|tcp|tylecp){idx}$", kv): st.session_state[ph] = rate
+                            if re.match(fr"^(?:hmcp|hangmuccp){idx}$", kv): st.session_state[ph] = hm
+                            if re.match(fr"^(?:ndcp|noidungcp|ndchiphi|nd){idx}$", kv): st.session_state[ph] = nd
+                            if re.match(fr"^(?:chiphi){idx}$", kv): st.session_state[ph] = nd if not hm else f"{hm}: {nd}"
+
+                        for i, r in df_tn.iterrows():
+                            idx = str(i + 1)
+                            rate = format_percent(float(r['Tỉ lệ']) * 100) if pd.notna(r.get('Tỉ lệ')) else ""
+                            hm = str(r.get('Hạng mục', '')).strip() if pd.notna(r.get('Hạng mục')) else ""
+                            nd = str(r.get('Nội dung chi tiết', '')).strip() if pd.notna(r.get('Nội dung chi tiết')) else ""
+                            
+                            if re.match(fr"^(?:tltn|ttn|tyletn|tldt){idx}$", kv): st.session_state[ph] = rate
+                            if re.match(fr"^(?:hmtn|hangmuctn|hmdt){idx}$", kv): st.session_state[ph] = hm
+                            if re.match(fr"^(?:ndtn|noidungtn|nddt|noidungdt|ndthunhap){idx}$", kv): st.session_state[ph] = nd
+                            if re.match(fr"^(?:thunhap|doanhthu){idx}$", kv): st.session_state[ph] = nd if not hm else f"{hm}: {nd}"
                     
                     execute_financial_engine(mapping, field_types)
                     st.rerun()
 
-    # --- RENDER FORM TABS ---
     st.divider()
     unique_tabs = list(dict.fromkeys(tabs_dict.values()))
     st_tabs = st.tabs(unique_tabs)
@@ -310,14 +268,17 @@ if file_data and file_word:
                         raw = ft.split(":", 1)[1]
                         opts = [o.strip() for o in raw.split(",")] if "," in raw else [o.strip() for o in raw.split("/")] if "/" in raw else [raw.strip()]
                         st.selectbox(ds, [""] + opts, key=ph, on_change=field_callback, kwargs=kw)
+                    elif is_noicap_desc(ds.lower()):
+                        st.selectbox(ds, [""] + NOICAP_OPTIONS, key=ph, on_change=field_callback, kwargs=kw)
+                    elif is_loan_type_desc(ds.lower()):
+                        st.selectbox(ds, [""] + LOAN_TYPE_OPTIONS, key=ph, on_change=field_callback, kwargs=kw)
                     elif is_tall:
                         st.text_area(ds, key=ph, height=120, on_change=field_callback, kwargs=kw)
                     else:
                         st.text_input(ds, key=ph, on_change=field_callback, kwargs=kw)
 
-    # --- XUẤT HỒ SƠ WORD ---
     st.divider()
-    if st.button("🚀 XUẤT HỒ SƠ WORD TỔNG HỢP", type="primary", use_container_width=True):
+    if st.button("🚀 XUẤT HỒ SƠ WORD", type="primary", use_container_width=True):
         execute_financial_engine(mapping, field_types)
         ctx = {}
         for ph, ds in mapping.items():
