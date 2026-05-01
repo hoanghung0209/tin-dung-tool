@@ -10,6 +10,9 @@ except Exception:  # pragma: no cover - runtime dependency
     zxingcpp = None
 
 
+MAX_SCAN_WIDTH = 1600
+
+
 class ScannerUnavailableError(RuntimeError):
     """Raised when QR scanning dependencies are not installed."""
 
@@ -21,25 +24,50 @@ def _ensure_runtime() -> None:
         )
 
 
+def _limit_image_size(img_bgr):
+    height, width = img_bgr.shape[:2]
+    if width <= MAX_SCAN_WIDTH:
+        return img_bgr
+    scale = MAX_SCAN_WIDTH / float(width)
+    return cv2.resize(img_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
+
 def _variants(img_bgr):
     outs = []
     green_channel = img_bgr[:, :, 1]
     outs.append(green_channel)
     outs.append(cv2.equalizeHist(green_channel))
+
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     outs.append(clahe.apply(green_channel))
+
     blur = cv2.GaussianBlur(green_channel, (0, 0), 1.2)
     sharp = cv2.addWeighted(green_channel, 1.6, blur, -0.6, 0)
     outs.append(sharp)
+
     _, th_otsu = cv2.threshold(green_channel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     outs.append(th_otsu)
+
     th_adapt = cv2.adaptiveThreshold(
-        green_channel, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 5
+        green_channel,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        5,
     )
     outs.append(th_adapt)
+
     outs.append(cv2.resize(green_channel, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC))
     outs.append(cv2.resize(green_channel, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC))
     return outs
+
+
+def _read_first_barcode(variant) -> str:
+    result = zxingcpp.read_barcode(variant)
+    if result and result.text:
+        return result.text
+    return ""
 
 
 def decode_qr_offline(image_path: str) -> str:
@@ -53,10 +81,12 @@ def decode_qr_offline(image_path: str) -> str:
     if img is None:
         raise FileNotFoundError(f"Không thể giải mã ảnh tại: {image_path}.")
 
+    img = _limit_image_size(img)
+
     for variant in _variants(img):
-        result = zxingcpp.read_barcode(variant)
-        if result and result.text:
-            return result.text
+        text = _read_first_barcode(variant)
+        if text:
+            return text
 
     for angle in (-15, -10, -7, -5, 5, 7, 10, 15):
         height, width = img.shape[:2]
@@ -69,9 +99,9 @@ def decode_qr_offline(image_path: str) -> str:
             borderMode=cv2.BORDER_REPLICATE,
         )
         for variant in _variants(rotated):
-            result = zxingcpp.read_barcode(variant)
-            if result and result.text:
-                return result.text
+            text = _read_first_barcode(variant)
+            if text:
+                return text
 
     raise ValueError(
         "Không decode được QR. Ảnh bị mờ, lóa sáng hoặc QR quá nhỏ. Hãy crop sát QR hoặc chụp lại ảnh rõ hơn."

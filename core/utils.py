@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from typing import Iterable
 
 from config import LONG_TEXT_HINTS
@@ -13,6 +14,17 @@ class OptionalDependencyError(RuntimeError):
 
 def safe_filename(s: str) -> str:
     return re.sub(r'[<>:"/\\|?*\n\r\t]', "_", (s or "").strip()) or "KetQua"
+
+
+def ascii_safe_filename(value: str, fallback: str = "HoSo") -> str:
+    """Convert Vietnamese text to a safe ASCII file name."""
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    text = unicodedata.normalize("NFKD", text).encode("ASCII", "ignore").decode("utf-8")
+    text = re.sub(r"[^A-Za-z0-9 _\-]", "", text)
+    text = re.sub(r"\s+", "_", text).strip("_")
+    return text or fallback
 
 
 def var_name(placeholder: str) -> str:
@@ -50,23 +62,33 @@ def normalize_person_key(desc: str) -> str:
     text = text.replace("uỷ quyền", "ủy quyền")
     text = re.sub(r"\bđvv\b", "đồng vay vốn", text)
     text = re.sub(r"\buq\b", "ủy quyền", text)
-
     if "thành viên" in text:
         return "thành viên"
-
     match = re.search(r"(đồng\s*vay\s*vốn|ủy\s*quyền)\s*([0-9]+)", text)
     if match:
         return f"{match.group(1)} {match.group(2)}"
-
     remove_words = [
-        "số thẻ cccd", "số cccd", "cccd", "số thẻ", "cmnd", "số cmnd",
-        "ngày tháng năm sinh", "ngày sinh", "năm sinh",
-        "họ và tên", "họ tên", "tên",
-        "ngày cấp", "nơi cấp", "địa chỉ thường trú", "thường trú", "địa chỉ", "giới tính",
+        "số thẻ cccd",
+        "số cccd",
+        "cccd",
+        "số thẻ",
+        "cmnd",
+        "số cmnd",
+        "ngày tháng năm sinh",
+        "ngày sinh",
+        "năm sinh",
+        "họ và tên",
+        "họ tên",
+        "tên",
+        "ngày cấp",
+        "nơi cấp",
+        "địa chỉ thường trú",
+        "thường trú",
+        "địa chỉ",
+        "giới tính",
     ]
     for word in remove_words:
         text = text.replace(word, "")
-
     text = re.sub(r"\s+", " ", text).strip()
     return text or "default"
 
@@ -87,7 +109,9 @@ def is_noicap_desc(desc: str) -> bool:
 
 def is_cccd_desc(desc: str) -> bool:
     desc_lower = (desc or "").lower()
-    return ("cccd" in desc_lower or "căn cước" in desc_lower or "cmnd" in desc_lower) and not is_issue_desc(desc) and not is_noicap_desc(desc)
+    return (
+        "cccd" in desc_lower or "căn cước" in desc_lower or "cmnd" in desc_lower
+    ) and not is_issue_desc(desc) and not is_noicap_desc(desc)
 
 
 def is_name_desc(desc: str) -> bool:
@@ -115,13 +139,19 @@ def is_loan_type_desc(desc: str) -> bool:
     return "loại cho vay" in (desc or "").lower()
 
 
-def parse_number_vi(value: str) -> float:
+def parse_number_vi(value: str | int | float) -> float:
+    """Parse Vietnamese money/integer format: 350.000.000 -> 350000000."""
+    if isinstance(value, (int, float)):
+        return float(value)
     text = str(value or "").strip().replace(".", "").replace(",", "")
     text = re.sub(r"[^0-9\-]", "", text)
     return float(text) if text not in ("", "-") else 0.0
 
 
-def parse_decimal_vi(value: str) -> float:
+def parse_decimal_vi(value: str | int | float) -> float:
+    """Parse Vietnamese decimal format: 10,8 -> 10.8."""
+    if isinstance(value, (int, float)):
+        return float(value)
     text = str(value or "").strip().replace(".", "").replace(",", ".")
     text = re.sub(r"[^0-9\.\-]", "", text)
     try:
@@ -130,7 +160,7 @@ def parse_decimal_vi(value: str) -> float:
         return 0.0
 
 
-def parse_percent_vi(value: str) -> float:
+def parse_percent_vi(value: str | int | float) -> float:
     text = str(value or "").strip().replace("%", "").replace(",", ".")
     text = re.sub(r"[^0-9\.\-]", "", text)
     try:
@@ -139,11 +169,11 @@ def parse_percent_vi(value: str) -> float:
         return 0.0
 
 
-def parse_rate_vi(value: str) -> float:
+def parse_rate_vi(value: str | int | float) -> float:
     return parse_percent_vi(value)
 
 
-def format_money_vi(value: float | int) -> str:
+def format_money_vi(value: float | int | str) -> str:
     if value in (None, ""):
         return ""
     try:
@@ -159,10 +189,17 @@ def format_decimal_vi(value: float, decimals: int = 2) -> str:
     return text.rstrip("0").rstrip(",")
 
 
+def format_percent_vi(value: float, decimals: int = 4) -> str:
+    if value is None or not math.isfinite(float(value)):
+        return ""
+    text = f"{float(value):.{decimals}f}".rstrip("0").rstrip(".")
+    return (text or "0").replace(".", ",")
+
+
 def vi_title_name(value: str) -> str:
     if not value:
         return ""
-    return " ".join(word.capitalize() if word else "" for word in value.split(" "))
+    return " ".join(word.capitalize() if word else "" for word in str(value).split(" "))
 
 
 def validate_cccd_12_digits(value: str) -> bool:
@@ -198,11 +235,12 @@ def format_area_input_text(value: str) -> str:
     clean = "".join(char for char in raw if char.isdigit() or char == ",")
     if not clean:
         return ""
-    parts = clean.split(",")
+    parts = clean.split(",", 1)
     int_part = f"{int(parts[0]):,}".replace(",", ".") if parts[0] else ""
     if len(parts) > 1:
         return f"{int_part},{parts[1]}"
-    return int_part if not clean.endswith(",") else f"{int_part},"
+    return f"{int_part}," if clean.endswith(",") else int_part
+
 
 def normalize_square_meter_text(value: str) -> str:
     text = str(value or "")
@@ -277,3 +315,49 @@ def safe_float(value: str | float | int) -> float:
         return parse_decimal_vi(str(value))
     except Exception:
         return 0.0
+
+
+def money_to_text_vi(value: int | float | str) -> str:
+    """Convert money number to Vietnamese words."""
+    try:
+        from num2words import num2words
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise OptionalDependencyError("Thiếu thư viện num2words để đọc tiền bằng chữ.") from exc
+
+    amount = int(round(parse_number_vi(value)))
+    if amount <= 0:
+        return ""
+    text = num2words(amount, lang="vi").replace("-", " ")
+    return text[:1].upper() + text[1:] + " đồng chẵn."
+
+
+def area_to_text_vi(value: str | int | float) -> str:
+    """Convert area text like 120,5 to Vietnamese words."""
+    try:
+        from num2words import num2words
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise OptionalDependencyError("Thiếu thư viện num2words để đọc diện tích bằng chữ.") from exc
+
+    text = format_area_input_text(str(value))
+    if not text:
+        return ""
+
+    raw = text.replace(".", "")
+    parts = raw.split(",", 1)
+    int_part = int(parts[0]) if parts[0] else 0
+    int_txt = num2words(int_part, lang="vi").replace("-", " ")
+
+    if len(parts) == 1 or parts[1] == "":
+        final_txt = int_txt
+    else:
+        decimal_part = parts[1]
+        decimal_words: list[str] = []
+        for char in decimal_part:
+            if char == "0":
+                decimal_words.append("không")
+            else:
+                decimal_words.append(num2words(int(char), lang="vi").replace("-", " "))
+        final_txt = f"{int_txt} phẩy {' '.join(decimal_words)}"
+
+    final_txt = final_txt.strip()
+    return final_txt[:1].upper() + final_txt[1:] + " mét vuông."
