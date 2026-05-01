@@ -63,29 +63,42 @@ def num_to_text_area(text_val):
 # MODULE 2: ĐỘNG CƠ TÍNH TOÁN TÀI CHÍNH
 # ==========================================
 def execute_financial_engine(mapping, field_types):
-    tvdt_key = ls_thang_key = None
-    vay_val = tuco_val = ls_nam_val = 0.0
+    tvdt_keys = []
+    ls_thang_keys = []
+    vay_val = 0
+    tuco_val = 0
+    ls_nam_val = 0.0
 
-    # 1. Thu thập biến
+    # 1. Thu thập biến (Sử dụng hàm MAX để chống ghi đè giá trị rỗng)
     for ph, ds in mapping.items():
         kv = var_name(ph).lower().replace("_", "")
         val = str(st.session_state.get(ph, "")).strip()
 
-        if kv in ["tienvay", "sotienvay", "sovonvay", "sotienxinvay", "mucvay", "sovay"]: vay_val = extract_number(val)
-        elif kv in ["vontuco", "tuco", "vonthamgia", "sovontuco"]: tuco_val = extract_number(val)
-        elif kv in ["tvdt", "tongvon", "tongvondautu", "tongmucdautu", "tongchiphi", "tongsovondautu", "tongsovon"]: tvdt_key = ph
-        elif ("ls" in kv or "laisuat" in kv) and "năm" in ds.lower(): ls_nam_val = extract_float(val)
-        elif ("ls" in kv or "laisuat" in kv) and "tháng" in ds.lower(): ls_thang_key = ph
+        if kv in ["tienvay", "sotienvay", "sovonvay", "sotienxinvay", "mucvay", "sovay"]: 
+            vay_val = max(vay_val, extract_number(val))
+        elif kv in ["vontuco", "tuco", "vonthamgia", "sovontuco"]: 
+            tuco_val = max(tuco_val, extract_number(val))
+        elif kv in ["tvdt", "tongvon", "tongvondautu", "tongmucdautu", "tongchiphi", "tongsovondautu", "tongsovon"]: 
+            tvdt_keys.append(ph)
+        elif ("ls" in kv or "laisuat" in kv) and "năm" in ds.lower(): 
+            ls_nam_val = max(ls_nam_val, extract_float(val))
+        elif ("ls" in kv or "laisuat" in kv) and "tháng" in ds.lower(): 
+            ls_thang_keys.append(ph)
 
     # 2. Tổng vốn & Lãi suất
     total_capital = vay_val + tuco_val
-    if total_capital > 0 and tvdt_key:
-        st.session_state[tvdt_key] = format_currency(total_capital)
-    elif tvdt_key:
-        total_capital = extract_number(st.session_state.get(tvdt_key, "0"))
+    
+    # Trường hợp người dùng gõ tay Tổng vốn nhưng chưa gõ Vay/Tự có
+    if total_capital == 0 and tvdt_keys:
+        total_capital = max([extract_number(st.session_state.get(k, "0")) for k in tvdt_keys])
 
-    if ls_nam_val > 0 and ls_thang_key:
-        st.session_state[ls_thang_key] = format_percent(ls_nam_val / 12.0)
+    if total_capital > 0:
+        for k in tvdt_keys:
+            st.session_state[k] = format_currency(total_capital)
+
+    if ls_nam_val > 0:
+        for k in ls_thang_keys:
+            st.session_state[k] = format_percent(ls_nam_val / 12.0)
 
     # 3. Fill Phương Án
     if total_capital > 0:
@@ -178,13 +191,9 @@ with st.sidebar:
         
         subjects = ["Thành viên", "Người đồng vay vốn 1", "Người ủy quyền 1", "Người ủy quyền 2", "Người thụ hưởng"]
         
-        # --- THIẾT KẾ PANEL SONG SONG MỚI ---
         for target in subjects:
             with st.expander(f"👤 {target}", expanded=False):
-                # Mỗi đối tượng có một ô upload ảnh với mã key riêng biệt
                 qr_img = st.file_uploader(f"Tải mặt trước CCCD", type=["png", "jpg", "jpeg"], key=f"qr_{target}")
-                
-                # Nút bấm quét cũng bị khóa với đối tượng đó
                 if qr_img and st.button(f"🚀 Quét dữ liệu {target}", key=f"btn_{target}", use_container_width=True):
                     with open(f"temp_qr_{target}.jpg", "wb") as f: f.write(qr_img.getbuffer())
                     try:
@@ -201,7 +210,6 @@ with st.sidebar:
                                 elif is_gender_desc(d_low): st.session_state[ph] = info.get("Gioi_tinh", "")
                                 count += 1
                         
-                        # Cập nhật thuật toán sau khi có tên mới
                         execute_financial_engine(mapping, field_types)
                         st.success(f"Đã nạp {count} trường cho: {target}")
                         st.rerun()
@@ -230,7 +238,6 @@ if file_data and file_word:
                         kv = var_name(ph).lower().replace("_", "")
                         if "tenphuongan" in kv or "tenpa" in kv: st.session_state[ph] = sel_pa
                         
-                        # Rót Chi phí
                         for i, r in df_cp.iterrows():
                             idx = str(i + 1)
                             rate = format_percent(float(r['Tỉ lệ']) * 100) if pd.notna(r.get('Tỉ lệ')) else ""
@@ -242,15 +249,14 @@ if file_data and file_word:
                             if re.match(fr"^(?:ndcp|noidungcp|ndchiphi|nd){idx}$", kv): st.session_state[ph] = nd
                             if re.match(fr"^(?:chiphi){idx}$", kv): st.session_state[ph] = nd if not hm else f"{hm}: {nd}"
 
-                        # Rót Thu nhập
                         for i, r in df_tn.iterrows():
                             idx = str(i + 1)
                             rate = format_percent(float(r['Tỉ lệ']) * 100) if pd.notna(r.get('Tỉ lệ')) else ""
                             hm = str(r.get('Hạng mục', '')).strip() if pd.notna(r.get('Hạng mục')) else ""
                             nd = str(r.get('Nội dung chi tiết', '')).strip() if pd.notna(r.get('Nội dung chi tiết')) else ""
                             
-                            if re.match(fr"^(?:tltn|ttn|tyletn|tldt|tyledt){idx}$", kv): st.session_state[ph] = rate
-                            if re.match(fr"^(?:hmtn|hangmuctn|hmdt|hangmucdt){idx}$", kv): st.session_state[ph] = hm
+                            if re.match(fr"^(?:tltn|ttn|tyletn|tldt){idx}$", kv): st.session_state[ph] = rate
+                            if re.match(fr"^(?:hmtn|hangmuctn|hmdt){idx}$", kv): st.session_state[ph] = hm
                             if re.match(fr"^(?:ndtn|noidungtn|nddt|noidungdt|ndthunhap){idx}$", kv): st.session_state[ph] = nd
                             if re.match(fr"^(?:thunhap|doanhthu){idx}$", kv): st.session_state[ph] = nd if not hm else f"{hm}: {nd}"
                     
