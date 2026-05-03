@@ -1,6 +1,6 @@
-streamlit==1.32.0
-pandas==2.2.1
-docxtpl==0.16.7
-num2words==0.5.13
-openpyxl==3.1.2
-Pillow==10.2.0
+streamlit>=1.32.0
+pandas>=2.0.0
+docxtpl>=0.16.7
+num2words>=0.5.13
+openpyxl>=3.1.2
+Pillow>=10.2.0
